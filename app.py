@@ -181,13 +181,16 @@ def run_order(to, selections):
 
             if canvas_data and canvas_data.startswith('data:image'):
                 try:
-                    from PIL import Image
-                    from pyzbar.pyzbar import decode as qr_decode
+                    import cv2
+                    import numpy as np
                     b64 = canvas_data.split(',')[1]
-                    img = Image.open(io.BytesIO(base64.b64decode(b64)))
-                    results = qr_decode(img)
-                    if results:
-                        upi_link = results[0].data.decode('utf-8')
+                    img_bytes = base64.b64decode(b64)
+                    arr = np.frombuffer(img_bytes, np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    detector = cv2.QRCodeDetector()
+                    data, _, _ = detector.detectAndDecode(img)
+                    if data:
+                        upi_link = data
                         log.info(f"Decoded UPI link: {upi_link}")
                 except Exception as e:
                     log.warning(f"QR decode failed: {e}")
