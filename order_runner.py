@@ -3,17 +3,13 @@
 Runs by GitHub Actions: fills Razorpay form, extracts UPI link, notifies user.
 Usage: python order_runner.py "0:1,8:2" "whatsapp:+919650000595"
 """
-import sys
-import os
-import re
-import io
-import base64
+import sys, os, re, io, base64, json
 
-RAZORPAY_URL  = "https://pages.razorpay.com/Pongaa"
-CUST_NAME     = "Rohit"
-CUST_PHONE    = "9650000595"
-CUST_APT      = "Republic of Whitefield"
-CUST_DOOR     = "H1649"
+RAZORPAY_URL = "https://pages.razorpay.com/Pongaa"
+CUST_NAME    = "Rohit"
+CUST_PHONE   = "9650000595"
+CUST_APT     = "Republic of Whitefield"
+CUST_DOOR    = "H1649"
 
 PRODUCTS = [
     (0,  "Malai Paneer 300g",   213.00),
@@ -38,8 +34,7 @@ def parse_selections(raw):
     for tok in re.split(r'[,\s]+', raw.strip()):
         m = re.match(r'^(\d+)(?::(\d+))?$', tok)
         if m:
-            idx = int(m.group(1))
-            qty = int(m.group(2)) if m.group(2) else 1
+            idx, qty = int(m.group(1)), int(m.group(2)) if m.group(2) else 1
             if 0 <= idx < len(PRODUCTS):
                 items[idx] = items.get(idx, 0) + qty
     return items
@@ -49,30 +44,74 @@ def send_whatsapp(to, body):
     client = Client(os.environ['TWILIO_SID'], os.environ['TWILIO_TOKEN'])
     client.messages.create(
         from_=os.environ.get('TWILIO_FROM', 'whatsapp:+14155238886'),
-        to=to,
-        body=body
-    )
-    print(f"Sent to {to}: {body[:80]}")
+        to=to, body=body)
+    print(f"Sent: {body[:120]}")
+
+def decode_qr_from_bytes(img_bytes):
+    """Try pyzbar first, fall back to OpenCV."""
+    # pyzbar (more reliable)
+    try:
+        from PIL import Image
+        from pyzbar.pyzbar import decode as qr_decode
+        img = Image.open(io.BytesIO(img_bytes))
+        results = qr_decode(img)
+        if results:
+            link = results[0].data.decode('utf-8')
+            print(f"pyzbar decoded: {link}")
+            return link
+    except Exception as e:
+        print(f"pyzbar failed: {e}")
+
+    # OpenCV fallback
+    try:
+        import cv2, numpy as np
+        arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+        if data:
+            print(f"OpenCV decoded: {data}")
+            return data
+    except Exception as e:
+        print(f"OpenCV failed: {e}")
+    return None
 
 def run(selections, to):
     from playwright.sync_api import sync_playwright
+
+    # Collect UPI links intercepted from network responses
+    upi_from_network = []
+
+    def on_response(response):
+        try:
+            if not any(x in response.url for x in ['razorpay', 'checkout']):
+                return
+            text = response.text()
+            found = re.findall(r'upi://pay[^\s\'"\\>]+', text)
+            for f in found:
+                print(f"Network UPI found: {f}")
+                upi_from_network.append(f)
+        except Exception:
+            pass
 
     print(f"Starting order: {selections}")
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-        )
+            args=['--no-sandbox','--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage','--disable-gpu'])
         page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.on('response', on_response)
+
         page.goto(RAZORPAY_URL, wait_until="networkidle", timeout=30000)
         page.wait_for_timeout(2000)
 
         # Set quantities
-        plus_btns = [b for b in page.query_selector_all("button") if b.inner_text().strip() == "+"]
-        for prod_idx, qty in selections.items():
-            if prod_idx < len(plus_btns):
+        plus_btns = [b for b in page.query_selector_all("button")
+                     if b.inner_text().strip() == "+"]
+        for idx, qty in selections.items():
+            if idx < len(plus_btns):
                 for _ in range(qty):
-                    plus_btns[prod_idx].click()
+                    plus_btns[idx].click()
                     page.wait_for_timeout(120)
         print("Quantities set.")
 
@@ -80,8 +119,7 @@ def run(selections, to):
         page.fill("input[name='name']", CUST_NAME)
         tel = page.query_selector("input[type='tel']")
         if tel:
-            tel.click()
-            tel.fill(CUST_PHONE)
+            tel.click(); tel.fill(CUST_PHONE)
         page.fill("input[name='appartment_name']", CUST_APT)
         page.fill("input[name='door_number']", CUST_DOOR)
         page.wait_for_timeout(500)
@@ -93,46 +131,68 @@ def run(selections, to):
                 txt = btn.inner_text()
                 if "pay" in txt.lower() or "₹" in txt:
                     btn.click()
-                    print(f"Clicked: {txt.strip()[:40]}")
+                    print(f"Clicked pay: {txt.strip()[:40]}")
                     break
             except Exception:
                 continue
 
-        page.wait_for_timeout(4000)
+        # Wait for Razorpay checkout to load
+        page.wait_for_timeout(6000)
 
-        # Find Razorpay iframe
-        rz_frame = None
-        for frame in page.frames:
-            if "razorpay" in frame.url.lower() and frame != page.main_frame:
-                rz_frame = frame
-                break
-        if not rz_frame and len(page.frames) > 1:
-            rz_frame = page.frames[1]
-
-        target = rz_frame or page
         upi_link = None
 
-        # Extract QR canvas and decode
-        try:
-            canvas_data = target.evaluate("""() => {
-                const c = document.querySelector('canvas');
-                return c ? c.toDataURL('image/png') : null;
-            }""")
-            if canvas_data and canvas_data.startswith('data:image'):
-                import cv2, numpy as np
-                b64 = canvas_data.split(',')[1]
-                arr = np.frombuffer(base64.b64decode(b64), np.uint8)
-                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
-                if data:
-                    upi_link = data
-                    print(f"UPI link: {upi_link}")
-        except Exception as e:
-            print(f"QR decode error: {e}")
+        # Method 1: from network interception
+        if upi_from_network:
+            upi_link = upi_from_network[0]
+            print(f"Using network UPI: {upi_link}")
+
+        # Method 2: find Razorpay iframe, screenshot QR canvas
+        if not upi_link:
+            rz_frame = None
+            for frame in page.frames:
+                if "razorpay" in frame.url.lower() and frame != page.main_frame:
+                    rz_frame = frame
+                    break
+            if not rz_frame and len(page.frames) > 1:
+                rz_frame = page.frames[1]
+            target = rz_frame or page
+
+            # Try canvas data URL
+            try:
+                canvas_b64 = target.evaluate("""() => {
+                    const c = document.querySelector('canvas');
+                    return c ? c.toDataURL('image/png') : null;
+                }""")
+                if canvas_b64 and ',' in canvas_b64:
+                    img_bytes = base64.b64decode(canvas_b64.split(',')[1])
+                    upi_link = decode_qr_from_bytes(img_bytes)
+            except Exception as e:
+                print(f"Canvas extraction failed: {e}")
+
+        # Method 3: full page screenshot + QR scan
+        if not upi_link:
+            try:
+                shot = page.screenshot(full_page=True)
+                upi_link = decode_qr_from_bytes(shot)
+                if upi_link:
+                    print(f"Screenshot QR decoded: {upi_link}")
+            except Exception as e:
+                print(f"Screenshot QR failed: {e}")
+
+        # Method 4: look for UPI link in page DOM text
+        if not upi_link:
+            try:
+                dom_text = page.evaluate("() => document.body.innerText")
+                found = re.findall(r'upi://pay[^\s\'"\\>]+', dom_text)
+                if found:
+                    upi_link = found[0]
+                    print(f"DOM UPI found: {upi_link}")
+            except Exception as e:
+                print(f"DOM search failed: {e}")
 
         browser.close()
 
-    # Build order summary
+    # Build order summary message
     lines = ["*Order placed!* ✅"]
     total = 0
     for idx, qty in selections.items():
@@ -142,19 +202,22 @@ def run(selections, to):
         lines.append(f"  {name} x{qty} = Rs {line:.0f}")
     lines.append(f"  Total: Rs {total:.0f}")
 
-    if upi_link:
-        lines.append(f"\nTap to pay (opens UPI app):\n{upi_link}")
+    if upi_link and upi_link.startswith('upi://'):
+        lines.append(f"\nTap to pay 👇 (opens GPay/PhonePe/ICICI):")
+        lines.append(upi_link)
     else:
-        lines.append(f"\nOpen to pay:\n{RAZORPAY_URL}")
-        lines.append("(Form is pre-filled, just tap Pay)")
+        lines.append(f"\nOpen to pay:")
+        lines.append(RAZORPAY_URL)
+        lines.append("(Select your item + fill details, then tap Pay)")
+        print("WARNING: Could not extract UPI link.")
 
     send_whatsapp(to, "\n".join(lines))
 
+
 if __name__ == "__main__":
-    raw_sel = sys.argv[1]   # e.g. "1:2,9:1"
-    to_num  = sys.argv[2]   # e.g. "whatsapp:+919650000595"
+    raw_sel = sys.argv[1]
+    to_num  = sys.argv[2]
     selections = parse_selections(raw_sel)
     if not selections:
-        print("No valid selections parsed.")
-        sys.exit(1)
+        print("No valid selections."); sys.exit(1)
     run(selections, to_num)
