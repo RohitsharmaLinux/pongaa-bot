@@ -162,12 +162,13 @@ def run(selections, to):
 
         upi_link = None
 
-        # Method 1: postMessage events from Razorpay iframe (most reliable)
+        # Method 1: postMessage events from Razorpay iframe
         try:
             msgs = page.evaluate("() => window.__rzp_messages__ || []")
             print(f"postMessage events: {len(msgs)}")
-            for m in msgs:
-                found = re.findall(r'upi://pay[^\s\'"\\>]+', str(m))
+            for i, m in enumerate(msgs):
+                print(f"  msg[{i}]: {str(m)[:300]}")   # full content for debugging
+                found = re.findall(r'upi://[^\s\'"\\>]+', str(m))
                 for f in found:
                     if 'pa=' in f and '${' not in f:
                         upi_link = f.rstrip('",}]\\')
@@ -199,20 +200,45 @@ def run(selections, to):
                 if upi_link:
                     break
 
-        # Method 4: screenshot the QR area and decode
+        # Method 4: screenshot → crop right half (where Razorpay QR lives) → decode
         if not upi_link:
             try:
-                shot = page.screenshot(full_page=True)
-                upi_link = decode_qr_from_bytes(shot)
-                if upi_link:
-                    print(f"Screenshot QR decoded: {upi_link}")
+                from PIL import Image
+                shot = page.screenshot(full_page=False)
+                img = Image.open(io.BytesIO(shot))
+                w, h = img.size
+                print(f"Screenshot size: {w}x{h}")
+                # QR is in the right portion of the Razorpay checkout modal
+                crops = [
+                    img.crop((w//2, 0, w, h)),           # right half
+                    img.crop((w//2, h//4, w, 3*h//4)),   # right-middle quarter
+                    img.crop((0, 0, w, h)),               # full
+                ]
+                for i, crop in enumerate(crops):
+                    # Upscale 3x for better QR decode
+                    big = crop.resize((crop.width*3, crop.height*3), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    big.save(buf, format='PNG')
+                    decoded = decode_qr_from_bytes(buf.getvalue())
+                    if decoded:
+                        upi_link = decoded
+                        print(f"Crop {i} QR decoded: {upi_link}")
+                        break
             except Exception as e:
                 print(f"Screenshot QR failed: {e}")
 
-        # Method 5: screenshot → upload to Flask → send as WhatsApp image
+        # Method 5: upload cropped QR area as image to Flask → send as WhatsApp MMS
         if not upi_link:
             try:
-                shot = page.screenshot(full_page=False)   # viewport only (faster)
+                from PIL import Image
+                shot = page.screenshot(full_page=False)
+                img = Image.open(io.BytesIO(shot))
+                w, h = img.size
+                # Crop to right half where Razorpay QR is shown
+                qr_crop = img.crop((w//2, 0, w, h))
+                buf = io.BytesIO()
+                qr_crop.save(buf, format='PNG')
+                shot = buf.getvalue()
                 render_url = os.environ.get('RENDER_URL', 'https://pongaa-bot.onrender.com')
                 resp = http.post(
                     f"{render_url}/store-qr",
