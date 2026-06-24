@@ -88,8 +88,10 @@ def run(selections, to):
             text = response.text()
             found = re.findall(r'upi://pay[^\s\'"\\>]+', text)
             for f in found:
-                print(f"Network UPI found: {f}")
-                upi_from_network.append(f)
+                # Skip JS template literals — real links always have pa= (payee VPA)
+                if 'pa=' in f and '${' not in f:
+                    print(f"Network UPI found: {f}")
+                    upi_from_network.append(f)
         except Exception:
             pass
 
