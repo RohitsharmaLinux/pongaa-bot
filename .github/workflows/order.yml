@@ -22,11 +22,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-pyzbar-playwright
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-v1
+
+      - name: Install system & Python deps
         run: |
           sudo apt-get install -y libzbar0
           pip install playwright opencv-python-headless numpy twilio pyzbar pillow
-          playwright install chromium --with-deps
+
+      - name: Install Chromium (skip if cached)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
 
       - name: Run order
         env:
