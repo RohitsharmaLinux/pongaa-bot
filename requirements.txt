@@ -1,0 +1,6 @@
+flask==3.0.3
+twilio==9.3.3
+playwright==1.45.0
+pillow==10.4.0
+pyzbar==0.1.9
+gunicorn==22.0.0

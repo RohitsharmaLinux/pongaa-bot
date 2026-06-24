@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: pongaa-bot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: TWILIO_SID
+        sync: false
+      - key: TWILIO_TOKEN
+        sync: false
+      - key: TWILIO_FROM
+        value: whatsapp:+14155238886
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          type: web
+          name: pongaa-bot
+          property: host
