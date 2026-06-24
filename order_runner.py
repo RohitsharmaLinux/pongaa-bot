@@ -115,6 +115,15 @@ def run(selections, to):
         page.goto(RAZORPAY_URL, wait_until="networkidle", timeout=30000)
         page.wait_for_timeout(2000)
 
+        # Listen for all postMessage events (Razorpay iframe → parent)
+        page.evaluate("""() => {
+            window.__rzp_messages__ = [];
+            window.addEventListener('message', function(e) {
+                try { window.__rzp_messages__.push(JSON.stringify(e.data)); }
+                catch(err) { window.__rzp_messages__.push(String(e.data)); }
+            }, true);
+        }""")
+
         # Set quantities
         plus_btns = [b for b in page.query_selector_all("button")
                      if b.inner_text().strip() == "+"]
@@ -147,39 +156,50 @@ def run(selections, to):
                 continue
 
         # Wait for Razorpay checkout to load
-        page.wait_for_timeout(6000)
+        # Inject postMessage listener BEFORE clicking pay (moved below)
+        # We already have the listener active from before clicking Pay
+        page.wait_for_timeout(8000)
 
         upi_link = None
 
-        # Method 1: from network interception
-        if upi_from_network:
-            upi_link = upi_from_network[0]
-            print(f"Using network UPI: {upi_link}")
-
-        # Method 2: find Razorpay iframe, screenshot QR canvas
-        if not upi_link:
-            rz_frame = None
-            for frame in page.frames:
-                if "razorpay" in frame.url.lower() and frame != page.main_frame:
-                    rz_frame = frame
+        # Method 1: postMessage events from Razorpay iframe (most reliable)
+        try:
+            msgs = page.evaluate("() => window.__rzp_messages__ || []")
+            print(f"postMessage events: {len(msgs)}")
+            for m in msgs:
+                found = re.findall(r'upi://pay[^\s\'"\\>]+', str(m))
+                for f in found:
+                    if 'pa=' in f and '${' not in f:
+                        upi_link = f.rstrip('",}]\\')
+                        print(f"postMessage UPI: {upi_link}")
+                        break
+                if upi_link:
                     break
-            if not rz_frame and len(page.frames) > 1:
-                rz_frame = page.frames[1]
-            target = rz_frame or page
+        except Exception as e:
+            print(f"postMessage check failed: {e}")
 
-            # Try canvas data URL
-            try:
-                canvas_b64 = target.evaluate("""() => {
-                    const c = document.querySelector('canvas');
-                    return c ? c.toDataURL('image/png') : null;
-                }""")
-                if canvas_b64 and ',' in canvas_b64:
-                    img_bytes = base64.b64decode(canvas_b64.split(',')[1])
-                    upi_link = decode_qr_from_bytes(img_bytes)
-            except Exception as e:
-                print(f"Canvas extraction failed: {e}")
+        # Method 2: network interception (filter real links only)
+        if not upi_link and upi_from_network:
+            upi_link = upi_from_network[0]
+            print(f"Network UPI: {upi_link}")
 
-        # Method 3: full page screenshot + QR scan
+        # Method 3: scan all frame sources for UPI link
+        if not upi_link:
+            for frame in page.frames:
+                try:
+                    src = frame.evaluate("() => document.documentElement.innerHTML")
+                    found = re.findall(r'upi://pay\?[^\s\'"\\<>]+', src)
+                    for f in found:
+                        if 'pa=' in f and '${' not in f:
+                            upi_link = f.rstrip('",}]\\')
+                            print(f"Frame source UPI: {upi_link}")
+                            break
+                except Exception:
+                    pass
+                if upi_link:
+                    break
+
+        # Method 4: screenshot the QR area and decode
         if not upi_link:
             try:
                 shot = page.screenshot(full_page=True)
@@ -188,17 +208,6 @@ def run(selections, to):
                     print(f"Screenshot QR decoded: {upi_link}")
             except Exception as e:
                 print(f"Screenshot QR failed: {e}")
-
-        # Method 4: look for UPI link in page DOM text
-        if not upi_link:
-            try:
-                dom_text = page.evaluate("() => document.body.innerText")
-                found = re.findall(r'upi://pay[^\s\'"\\>]+', dom_text)
-                if found:
-                    upi_link = found[0]
-                    print(f"DOM UPI found: {upi_link}")
-            except Exception as e:
-                print(f"DOM search failed: {e}")
 
         # Method 5: screenshot → upload to Flask → send as WhatsApp image
         if not upi_link:
