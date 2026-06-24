@@ -158,33 +158,57 @@ def run(selections, to):
         # Wait for Razorpay checkout to load
         # Inject postMessage listener BEFORE clicking pay (moved below)
         # We already have the listener active from before clicking Pay
+        # Wait for Razorpay checkout to fully render the QR
         page.wait_for_timeout(8000)
 
         upi_link = None
 
-        # Method 1: postMessage events from Razorpay iframe
+        # Method 1: screenshot the QR canvas element directly via frame_locator
+        # Playwright can screenshot cross-origin iframe elements natively
         try:
-            msgs = page.evaluate("() => window.__rzp_messages__ || []")
-            print(f"postMessage events: {len(msgs)}")
-            for i, m in enumerate(msgs):
-                print(f"  msg[{i}]: {str(m)[:300]}")   # full content for debugging
-                found = re.findall(r'upi://[^\s\'"\\>]+', str(m))
-                for f in found:
-                    if 'pa=' in f and '${' not in f:
-                        upi_link = f.rstrip('",}]\\')
-                        print(f"postMessage UPI: {upi_link}")
-                        break
-                if upi_link:
-                    break
+            from PIL import Image
+            rz_iframe = page.frame_locator("iframe").first
+            canvas = rz_iframe.locator("canvas").first
+            canvas.wait_for(timeout=5000)
+            qr_bytes = canvas.screenshot()
+            print(f"Canvas screenshot: {len(qr_bytes)} bytes")
+            # Upscale 4x for reliable QR decode
+            img = Image.open(io.BytesIO(qr_bytes))
+            big = img.resize((img.width * 4, img.height * 4), Image.LANCZOS)
+            buf = io.BytesIO()
+            big.save(buf, format='PNG')
+            upi_link = decode_qr_from_bytes(buf.getvalue())
+            if upi_link:
+                print(f"Canvas element QR decoded: {upi_link}")
+            else:
+                print("Canvas screenshot taken but QR decode failed")
         except Exception as e:
-            print(f"postMessage check failed: {e}")
+            print(f"Canvas element screenshot failed: {e}")
 
-        # Method 2: network interception (filter real links only)
+        # Method 2: postMessage events
+        if not upi_link:
+            try:
+                msgs = page.evaluate("() => window.__rzp_messages__ || []")
+                print(f"postMessage events: {len(msgs)}")
+                for i, m in enumerate(msgs):
+                    print(f"  msg[{i}]: {str(m)[:300]}")
+                    found = re.findall(r'upi://[^\s\'"\\>]+', str(m))
+                    for f in found:
+                        if 'pa=' in f and '${' not in f:
+                            upi_link = f.rstrip('",}]\\')
+                            print(f"postMessage UPI: {upi_link}")
+                            break
+                    if upi_link:
+                        break
+            except Exception as e:
+                print(f"postMessage check failed: {e}")
+
+        # Method 3: network interception
         if not upi_link and upi_from_network:
             upi_link = upi_from_network[0]
             print(f"Network UPI: {upi_link}")
 
-        # Method 3: scan all frame sources for UPI link
+        # Method 4: scan frame HTML for UPI link
         if not upi_link:
             for frame in page.frames:
                 try:
@@ -193,39 +217,12 @@ def run(selections, to):
                     for f in found:
                         if 'pa=' in f and '${' not in f:
                             upi_link = f.rstrip('",}]\\')
-                            print(f"Frame source UPI: {upi_link}")
+                            print(f"Frame HTML UPI: {upi_link}")
                             break
                 except Exception:
                     pass
                 if upi_link:
                     break
-
-        # Method 4: screenshot → crop right half (where Razorpay QR lives) → decode
-        if not upi_link:
-            try:
-                from PIL import Image
-                shot = page.screenshot(full_page=False)
-                img = Image.open(io.BytesIO(shot))
-                w, h = img.size
-                print(f"Screenshot size: {w}x{h}")
-                # QR is in the right portion of the Razorpay checkout modal
-                crops = [
-                    img.crop((w//2, 0, w, h)),           # right half
-                    img.crop((w//2, h//4, w, 3*h//4)),   # right-middle quarter
-                    img.crop((0, 0, w, h)),               # full
-                ]
-                for i, crop in enumerate(crops):
-                    # Upscale 3x for better QR decode
-                    big = crop.resize((crop.width*3, crop.height*3), Image.LANCZOS)
-                    buf = io.BytesIO()
-                    big.save(buf, format='PNG')
-                    decoded = decode_qr_from_bytes(buf.getvalue())
-                    if decoded:
-                        upi_link = decoded
-                        print(f"Crop {i} QR decoded: {upi_link}")
-                        break
-            except Exception as e:
-                print(f"Screenshot QR failed: {e}")
 
         # Method 5: upload cropped QR area as image to Flask → send as WhatsApp MMS
         if not upi_link:
