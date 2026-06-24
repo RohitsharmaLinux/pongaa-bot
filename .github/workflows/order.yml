@@ -49,4 +49,5 @@ jobs:
           TWILIO_SID:   ${{ secrets.TWILIO_SID }}
           TWILIO_TOKEN: ${{ secrets.TWILIO_TOKEN }}
           TWILIO_FROM:  ${{ secrets.TWILIO_FROM }}
+          RENDER_URL:   https://pongaa-bot.onrender.com
         run: python order_runner.py "${{ inputs.selections }}" "${{ inputs.to }}"

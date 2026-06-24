@@ -5,9 +5,12 @@ Conversation handler on Render; order execution on GitHub Actions.
 """
 import os
 import re
+import io
+import uuid
+import base64
 import logging
 import requests
-from flask import Flask, request
+from flask import Flask, request, send_file
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 
@@ -40,7 +43,8 @@ PRODUCTS = [
     (14, "Kolkata Mudi 500g",   211.00),
 ]
 
-sessions = {}
+sessions  = {}
+qr_store  = {}   # token -> PNG bytes (in-memory, cleared on restart)
 
 def menu_text():
     lines = ["*PONGA PANEER — ORDER MENU*\n"]
@@ -99,6 +103,19 @@ def twiml_reply(body):
 @app.route('/health')
 def health():
     return 'ok'
+
+@app.route('/store-qr', methods=['POST'])
+def store_qr():
+    token = uuid.uuid4().hex[:10]
+    qr_store[token] = base64.b64decode(request.json['image'])
+    host = os.environ.get('RENDER_EXTERNAL_URL', 'pongaa-bot.onrender.com').replace('https://','')
+    return {'url': f"https://{host}/qr/{token}"}
+
+@app.route('/qr/<token>')
+def serve_qr(token):
+    if token not in qr_store:
+        return 'Not found', 404
+    return send_file(io.BytesIO(qr_store[token]), mimetype='image/png')
 
 @app.route('/webhook', methods=['POST'])
 def webhook():

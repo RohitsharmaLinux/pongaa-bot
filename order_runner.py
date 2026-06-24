@@ -3,7 +3,7 @@
 Runs by GitHub Actions: fills Razorpay form, extracts UPI link, notifies user.
 Usage: python order_runner.py "0:1,8:2" "whatsapp:+919650000595"
 """
-import sys, os, re, io, base64, json
+import sys, os, re, io, base64, json, requests as http
 
 RAZORPAY_URL = "https://pages.razorpay.com/Pongaa"
 CUST_NAME    = "Rohit"
@@ -39,13 +39,21 @@ def parse_selections(raw):
                 items[idx] = items.get(idx, 0) + qty
     return items
 
-def send_whatsapp(to, body):
+def _twilio_client():
     from twilio.rest import Client
-    client = Client(os.environ['TWILIO_SID'], os.environ['TWILIO_TOKEN'])
-    client.messages.create(
+    return Client(os.environ['TWILIO_SID'], os.environ['TWILIO_TOKEN'])
+
+def send_whatsapp(to, body):
+    _twilio_client().messages.create(
         from_=os.environ.get('TWILIO_FROM', 'whatsapp:+14155238886'),
         to=to, body=body)
     print(f"Sent: {body[:120]}")
+
+def send_whatsapp_media(to, body, media_url):
+    _twilio_client().messages.create(
+        from_=os.environ.get('TWILIO_FROM', 'whatsapp:+14155238886'),
+        to=to, body=body, media_url=[media_url])
+    print(f"Sent media: {media_url}")
 
 def decode_qr_from_bytes(img_bytes):
     """Try pyzbar first, fall back to OpenCV."""
@@ -192,6 +200,28 @@ def run(selections, to):
             except Exception as e:
                 print(f"DOM search failed: {e}")
 
+        # Method 5: screenshot → upload to Flask → send as WhatsApp image
+        if not upi_link:
+            try:
+                shot = page.screenshot(full_page=False)   # viewport only (faster)
+                render_url = os.environ.get('RENDER_URL', 'https://pongaa-bot.onrender.com')
+                resp = http.post(
+                    f"{render_url}/store-qr",
+                    json={"image": base64.b64encode(shot).decode()},
+                    timeout=15
+                )
+                if resp.ok:
+                    qr_image_url = resp.json().get('url')
+                    print(f"QR image URL: {qr_image_url}")
+                else:
+                    qr_image_url = None
+                    print(f"store-qr failed: {resp.status_code}")
+            except Exception as e:
+                qr_image_url = None
+                print(f"Screenshot upload failed: {e}")
+        else:
+            qr_image_url = None
+
         browser.close()
 
     # Build order summary message
@@ -204,16 +234,19 @@ def run(selections, to):
         lines.append(f"  {name} x{qty} = Rs {line:.0f}")
     lines.append(f"  Total: Rs {total:.0f}")
 
-    if upi_link and upi_link.startswith('upi://'):
-        lines.append(f"\nTap to pay 👇 (opens GPay/PhonePe/ICICI):")
-        lines.append(upi_link)
-    else:
-        lines.append(f"\nOpen to pay:")
-        lines.append(RAZORPAY_URL)
-        lines.append("(Select your item + fill details, then tap Pay)")
-        print("WARNING: Could not extract UPI link.")
+    msg = "\n".join(lines)
 
-    send_whatsapp(to, "\n".join(lines))
+    if upi_link and upi_link.startswith('upi://'):
+        msg += f"\n\nTap to pay (opens GPay/PhonePe):\n{upi_link}"
+        send_whatsapp(to, msg)
+    elif qr_image_url:
+        # Send order summary as text, then QR image separately
+        send_whatsapp(to, msg + "\n\nScan the QR below with any UPI app 👇")
+        send_whatsapp_media(to, "Scan to pay:", qr_image_url)
+    else:
+        msg += f"\n\nOpen to pay:\n{RAZORPAY_URL}"
+        send_whatsapp(to, msg)
+        print("WARNING: Could not get UPI link or QR image.")
 
 
 if __name__ == "__main__":
