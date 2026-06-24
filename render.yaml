@@ -3,8 +3,8 @@ services:
     name: pongaa-bot
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt && playwright install chromium
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --timeout 120 --workers 1 app:app
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --timeout 30 --workers 1 app:app
     envVars:
       - key: TWILIO_SID
         sync: false
@@ -12,5 +12,7 @@ services:
         sync: false
       - key: TWILIO_FROM
         value: whatsapp:+14155238886
-      - key: RENDER_EXTERNAL_URL
+      - key: GITHUB_TOKEN
         sync: false
+      - key: GITHUB_REPO
+        value: RohitSharmaLinux/pongaa-bot

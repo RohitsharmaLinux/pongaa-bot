@@ -1,0 +1,35 @@
+name: Place Order
+
+on:
+  workflow_dispatch:
+    inputs:
+      selections:
+        description: 'Item selections e.g. "1:2,9:1"'
+        required: true
+      to:
+        description: 'WhatsApp number e.g. whatsapp:+919650000595'
+        required: true
+
+jobs:
+  order:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright opencv-python-headless numpy twilio
+          playwright install chromium --with-deps
+
+      - name: Run order
+        env:
+          TWILIO_SID:   ${{ secrets.TWILIO_SID }}
+          TWILIO_TOKEN: ${{ secrets.TWILIO_TOKEN }}
+          TWILIO_FROM:  ${{ secrets.TWILIO_FROM }}
+        run: python order_runner.py "${{ inputs.selections }}" "${{ inputs.to }}"
