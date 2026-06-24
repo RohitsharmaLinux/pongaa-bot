@@ -3,7 +3,7 @@ services:
     name: pongaa-bot
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
+    buildCommand: pip install -r requirements.txt && playwright install chromium
     startCommand: gunicorn --bind 0.0.0.0:$PORT --timeout 120 --workers 1 app:app
     envVars:
       - key: TWILIO_SID
